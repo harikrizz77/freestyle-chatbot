@@ -1,0 +1,7 @@
+upc,description,category,brand,store,week_ending,units,price,promo,retail_units_all_stores,launch_date,is_focal,package_size,flavor
+1001,SnackCo Classic Chips,salty_snacks,SnackCo,store_1,2024-01-07,500,2.99,False,5000,,False,10oz,original
+1002,SnackCo Zesty Chips,salty_snacks,SnackCo,store_1,2024-01-07,0,3.29,False,5000,2024-02-01,True,10oz,zesty
+1003,RivalCo Classic Chips,salty_snacks,RivalCo,store_1,2024-01-07,600,2.89,False,5000,,False,10oz,original
+1001,SnackCo Classic Chips,salty_snacks,SnackCo,store_1,2024-02-11,420,2.99,False,5000,,False,10oz,original
+1002,SnackCo Zesty Chips,salty_snacks,SnackCo,store_1,2024-02-11,150,3.29,False,5000,2024-02-01,True,10oz,zesty
+1003,RivalCo Classic Chips,salty_snacks,RivalCo,store_1,2024-02-11,560,2.89,False,5000,,False,10oz,original

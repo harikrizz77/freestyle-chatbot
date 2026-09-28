@@ -1,0 +1,7 @@
+model_trim_code,model_name,segment,manufacturer,region,month,registrations,avg_transaction_price,total_segment_registrations,launch_date,is_focal,price_tier,body_type,fuel_type,engine_displacement_l
+X100-LX,CarCo Sedan LX,compact_sedan,CarCo,IN-MH,2024-01-01,1200,18000,25000,,False,mid,sedan,petrol,1.5
+X100-EV,CarCo Sedan EV,compact_sedan,CarCo,IN-MH,2024-01-01,0,22000,25000,2024-02-15,True,mid,sedan,electric,0.0
+Y200-LX,RivalAuto Sedan LX,compact_sedan,RivalAuto,IN-MH,2024-01-01,1400,17500,25000,,False,mid,sedan,petrol,1.4
+X100-LX,CarCo Sedan LX,compact_sedan,CarCo,IN-MH,2024-03-01,900,18000,25000,,False,mid,sedan,petrol,1.5
+X100-EV,CarCo Sedan EV,compact_sedan,CarCo,IN-MH,2024-03-01,500,22000,25000,2024-02-15,True,mid,sedan,electric,0.0
+Y200-LX,RivalAuto Sedan LX,compact_sedan,RivalAuto,IN-MH,2024-03-01,1300,17500,25000,,False,mid,sedan,petrol,1.4

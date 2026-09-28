@@ -1,0 +1,131 @@
+# method_rules.yaml
+# Drives the `method_selector` LangGraph node. The `data_agent` MUST populate the
+# `inputs` below from the loaded, normalized data BEFORE this file is consulted.
+# The LLM's only job here is to read these facts and pick the FIRST matching rule.
+# It does NOT invent methods and NEVER computes an estimate.
+
+# ---------------------------------------------------------------------------
+# INPUT FACTS the data_agent computes and passes in PipelineState.data_profile
+# ---------------------------------------------------------------------------
+inputs:
+  data_level:
+    description: Finest granularity available.
+    values: [transaction, panel, aggregate]   # transaction=individual choices; panel=household repeat; aggregate=market shares
+  price_variation:
+    description: Independent price variation across time/region/SKU needed to identify elasticities.
+    values: [none, low, sufficient]
+  donor_pool:
+    description: Availability of comparable unaffected products/regions for a counterfactual.
+    values: [none, weak, strong]
+  pre_periods:
+    description: Number of pre-launch time periods observed for the incumbent.
+    type: int
+  segments_estimable:
+    description: True if loyalty/income/price-sensitivity segments can be derived (needs panel/transaction).
+    type: bool
+  concurrent_shock:
+    description: Set by competitor/macro agents -- a major overlapping event in the window.
+    values: [none, suspected, confirmed]
+
+# ---------------------------------------------------------------------------
+# THRESHOLDS
+# ---------------------------------------------------------------------------
+thresholds:
+  min_pre_periods_synthetic_control: 12
+  min_pre_periods_causal_impact: 8
+  min_pre_periods_did: 6
+  cross_check_agreement_tolerance: 0.10   # |method_A - method_B| / focal_units; validator flags if exceeded
+
+# ---------------------------------------------------------------------------
+# RULES -- evaluated top-to-bottom; first match wins. Each names a PRIMARY method,
+# one or more CROSS-CHECKS, and a FALLBACK if the primary fails to fit.
+# ---------------------------------------------------------------------------
+rules:
+
+  - id: mixed_logit_full
+    when:
+      data_level: [transaction, panel]
+      price_variation: [sufficient]
+      segments_estimable: true
+    primary: mixed_logit          # xlogit/pylogit; random coeffs -> per-segment cannibalization
+    cross_checks: [synthetic_control]
+    segmentation: distributional  # estimate beta distributions, no hard buckets
+    notes: Best case. Individual choices + price variation -> structural counterfactual per segment.
+
+  - id: nested_logit_individual
+    when:
+      data_level: [transaction, panel]
+      price_variation: [sufficient, low]
+    primary: nested_logit_individual   # pylogit; loyalty via nest parameter lambda
+    cross_checks: [did]
+    segmentation: region_or_price_tier
+    notes: Choice-level data but segments not cleanly estimable -- rely on nest structure for loyalty.
+
+  - id: blp_aggregate
+    when:
+      data_level: [aggregate]
+      price_variation: [sufficient]
+    primary: blp_nested_logit     # pyblp; recovers elasticities from shares + price variation
+    cross_checks: [synthetic_control, causal_impact]
+    segmentation: region_or_price_tier
+    notes: Classic electronics/CPG-shipment case (e.g. the iPhone demo).
+
+  - id: synthetic_control_primary
+    when:
+      data_level: [aggregate]
+      price_variation: [low, none]
+      donor_pool: [strong]
+      pre_periods: ">= min_pre_periods_synthetic_control"
+    primary: synthetic_control
+    cross_checks: [causal_impact]
+    segmentation: region_or_price_tier
+    notes: No usable price variation but a strong donor pool -- reduced-form counterfactual.
+
+  - id: causal_impact_primary
+    when:
+      data_level: [aggregate]
+      price_variation: [low, none]
+      donor_pool: [weak]
+      pre_periods: ">= min_pre_periods_causal_impact"
+    primary: causal_impact
+    cross_checks: [did]
+    segmentation: none
+    notes: Weak donors; forecast incumbent from pre-period + covariates, compare to actual.
+
+  - id: did_primary
+    when:
+      data_level: [aggregate, panel]
+      donor_pool: [weak, strong]
+      pre_periods: ">= min_pre_periods_did"
+    primary: did                  # linearmodels PanelOLS, external factors as controls
+    cross_checks: [causal_impact]
+    segmentation: region_or_price_tier
+    notes: Fallback when time series is short-ish but matched controls exist. Must pass parallel-trends test.
+
+  - id: sparse_bayesian_fallback
+    when:
+      data_level: [aggregate, panel]
+      price_variation: [low, none]
+      donor_pool: [none, weak]
+    primary: bayesian_shrinkage_logit   # priors from analogous category; wide CIs
+    cross_checks: []
+    segmentation: none
+    confidence_ceiling: low       # validator caps confidence regardless of fit
+    notes: Data-poor startup case. Produce a directional estimate with honest, wide uncertainty.
+
+# ---------------------------------------------------------------------------
+# HARD OVERRIDES -- applied by the validator AFTER a method runs, regardless of rule.
+# ---------------------------------------------------------------------------
+overrides:
+  - when: { concurrent_shock: confirmed }
+    action: cap_confidence_low
+    require: competitor_or_macro_covariate_included
+    notes: A confirmed overlapping competitor/macro event must be modeled as a covariate; if it cannot be, the estimate is low-confidence by rule.
+
+  - when: { cross_check_disagreement: true }   # exceeds thresholds.cross_check_agreement_tolerance
+    action: cap_confidence_medium
+    notes: Primary and cross-check disagree beyond tolerance -- never report high confidence.
+
+  - when: { mass_balance_failed: true }
+    action: halt
+    notes: Removed focal demand did not conserve on redistribution -- implementation bug, block output.
