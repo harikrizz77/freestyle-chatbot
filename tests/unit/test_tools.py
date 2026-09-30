@@ -171,3 +171,26 @@ def test_build_aggregate_design_without_context_leaves_covariates_at_zero(
     design = build_aggregate_design(sales, choice_set, products=products)
     assert np.all(design.competitor_pressure == 0.0)
     assert np.all(design.macro_index == 0.0)
+
+
+def test_build_market_context_broadcasts_unmatched_region_to_all_regions(
+    cpg_products_and_sales,
+) -> None:
+    """A national indicator (e.g. FRED CPI, fetched without pinning a specific store
+    region) has region="" -- since that never matches a real store's region code, it
+    must apply to every region in the sales data rather than being silently dropped.
+    """
+    _, sales, _ = cpg_products_and_sales
+    macro = [
+        MacroSeries(
+            region="",
+            indicator="cpi",
+            series={date(2024, 1, 7): 300.0, date(2024, 2, 11): 310.0},
+            source="test",
+        )
+    ]
+    contexts = build_market_context(sales, macro_series=macro)
+    by_period = {c.period: c for c in contexts}
+    assert by_period[date(2024, 1, 7)].macro_index["cpi"] == pytest.approx(300.0)
+    assert by_period[date(2024, 2, 11)].macro_index["cpi"] == pytest.approx(310.0)
+    assert all(c.region == "store_1" for c in contexts)  # the sample CSV's only region

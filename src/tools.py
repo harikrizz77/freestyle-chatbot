@@ -158,6 +158,12 @@ def build_market_context(
     on a sales period boundary. Competitor pressure per brand is the confidence-weighted
     sum of its events in that market (see `_COMPETITOR_EVENT_WEIGHT` for the per-kind
     weights -- a deliberately simple, documented heuristic, not a fitted quantity).
+
+    A `MacroSeries`/`CompetitorEvent` whose `region` doesn't match any region actually
+    present in `sales` (including the common case of an empty string, e.g. a national
+    FRED indicator fetched without pinning a specific store region) is broadcast to
+    *every* region in `sales` instead of being silently dropped -- a macro indicator
+    like inflation is national/global, not tied to one store's region code.
     """
     competitor_events = competitor_events or []
     macro_series = macro_series or []
@@ -175,22 +181,29 @@ def build_market_context(
             return max(eligible)
         return min(periods) if periods else None
 
+    def target_regions(signal_region: str) -> list[str]:
+        if signal_region in periods_by_region:
+            return [signal_region]
+        return list(periods_by_region)  # unmatched/national -> broadcast to all regions
+
     macro_by_market: dict[tuple[str, date], dict[str, float]] = {}
     for series in macro_series:
-        for obs_date, value in sorted(series.series.items()):
-            period = as_of_period(series.region, obs_date)
-            if period is None:
-                continue
-            macro_by_market.setdefault((series.region, period), {})[series.indicator] = value
+        for region in target_regions(series.region):
+            for obs_date, value in sorted(series.series.items()):
+                period = as_of_period(region, obs_date)
+                if period is None:
+                    continue
+                macro_by_market.setdefault((region, period), {})[series.indicator] = value
 
     pressure_by_market: dict[tuple[str, date], dict[str, float]] = {}
     for event in competitor_events:
-        period = as_of_period(event.region, event.event_date)
-        if period is None:
-            continue
         weight = _COMPETITOR_EVENT_WEIGHT.get(event.kind, 0.2) * event.confidence
-        bucket = pressure_by_market.setdefault((event.region, period), {})
-        bucket[event.competitor_brand] = bucket.get(event.competitor_brand, 0.0) + weight
+        for region in target_regions(event.region):
+            period = as_of_period(region, event.event_date)
+            if period is None:
+                continue
+            bucket = pressure_by_market.setdefault((region, period), {})
+            bucket[event.competitor_brand] = bucket.get(event.competitor_brand, 0.0) + weight
 
     return [
         MarketContext(

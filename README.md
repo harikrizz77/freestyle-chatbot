@@ -25,7 +25,7 @@ against; this README documents what's actually implemented against that spec.
 | 4 | Segmentation (KMeans / region-price-tier fallback), competitor event sourcing, FRED/World Bank macro adapters -- **folded into the fitted model as covariates**, not just used to flag a confound | `tests/unit/test_tools.py::test_build_aggregate_design_folds_in_competitor_pressure`; `tests/integration/test_agent_graph.py` proves a confirmed shock that's modeled downgrades confidence instead of halting, and that supplying competitor/macro data measurably changes the estimate |
 | 5 | FastAPI (`/analyze`, `/methods`, `/health`) + Streamlit dashboard | `tests/unit/test_api.py` |
 
-**80/80 tests passing**, `ruff check .` clean, `mypy` clean on `src/schema`, `src/causal`,
+**88/88 tests passing**, `ruff check .` clean, `mypy` clean on `src/schema`, `src/causal`,
 `src/data` (strict mode). Coverage on `src/causal` and `src/schema` (the spec's explicit
 target) is 90%+; see `pytest --cov=src --cov-report=term-missing`.
 
@@ -63,6 +63,26 @@ curl -X POST localhost:8000/analyze -H 'Content-Type: application/json' -d '{
   "csv_path": "tests/fixtures/cpg_scanner_sample.csv"
 }'
 ```
+
+### Automatic competitor/macro data (no manual wiring required)
+
+Real per-product sales data isn't freely public for most industries, so **CSV (or
+another `DataAdapter`) stays the primary, required data source** -- but competitor
+news and macro/economic context *are* genuinely public and are fetched automatically
+once you configure the relevant key in `.env`:
+
+```bash
+ANTHROPIC_API_KEY=sk-...   # enables live competitor-news search (launches, price cuts)
+FRED_API_KEY=...           # enables live US macro indicators (CPI, disposable income)
+```
+
+With either key set, `POST /analyze` and the Streamlit dashboard automatically pull in
+that signal for every run -- no extra request fields, no code -- and fold it into the
+fitted model's math (not just a confidence flag; see `src/tools.py:build_market_context`).
+Which competitor brands to search for is derived automatically from the incumbents the
+relationship agent already found, not something you have to name. Every result's
+narrative states plainly whether competitor/macro data fed into that specific number.
+FRED's key is free at https://fred.stlouisfed.org/docs/api/api_key.html.
 
 ## Architecture
 
@@ -116,6 +136,16 @@ tests/fixtures/     hand-derived known-answer nested-logit fixture + simulated M
   (`tests/fixtures/simulated_transactions.py`) -- this exercises the identical
   estimation machinery a real panel would, and the MLE recovers the generating
   parameters within tolerance (`tests/unit/test_fit_nested_logit.py`).
+- **There is no "auto-fetch a company's product sales from the public internet"
+  adapter, on purpose.** Per-SKU/per-store unit sales data essentially isn't freely
+  public in any industry the build plan names -- Nielsen/Circana panels, IDC/Counterpoint
+  shipment reports, and WardsAuto are all paid/licensed; the one genuinely free,
+  public, downloadable dataset (Dominick's Finer Foods, Kilts Center) is a fixed
+  1990s Chicago dataset, not live data about a product a user names. `DataAdapter`
+  (CSV or another format you write) stays the required entry point for sales data;
+  what *is* automated is the genuinely public context around it -- competitor news
+  (Anthropic web search) and macro indicators (FRED) -- via `ANTHROPIC_API_KEY`/
+  `FRED_API_KEY` in `.env`, with zero other wiring required (see Quickstart above).
 
 ### Extensibility proof (build plan section 12's "golden rule")
 

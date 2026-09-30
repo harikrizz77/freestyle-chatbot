@@ -19,9 +19,41 @@ from src.agents.reporter import narrate
 from src.agents.state import PipelineState
 from src.agents.validator import validate
 from src.schema.signals import ConcurrentShockAssessment
-from src.signals.competitor import assess_concurrent_shock, fetch_competitor_events
-from src.signals.macro import fetch_macro
+from src.signals.competitor import (
+    AnthropicWebSearchAdapter,
+    SearchAdapter,
+    assess_concurrent_shock,
+    fetch_competitor_events,
+)
+from src.signals.macro import FredMacroSource, MacroSource, fetch_macro
 from src.tools import build_market_context
+
+# Fetched automatically when a `macro_source` is active (explicit or auto-constructed
+# from `settings.fred_api_key`) but the caller didn't name specific indicators.
+DEFAULT_MACRO_INDICATORS = ["cpi", "disposable_income"]
+
+
+def _default_search_adapter(settings: Settings) -> SearchAdapter | None:
+    """The "gather data on its own" default for competitor signals: if the user has
+    configured an Anthropic API key, use the real web-search adapter automatically --
+    no extra wiring required. Returns None (competitor signals stay off) otherwise.
+    A separate function so tests can monkeypatch it instead of hitting the real API.
+    """
+    if not settings.anthropic_api_key:
+        return None
+    return AnthropicWebSearchAdapter(settings.anthropic_api_key, settings.anthropic_model)
+
+
+def _default_macro_source(settings: Settings) -> MacroSource | None:
+    """The "gather data on its own" default for macro signals: if the user has
+    configured a FRED API key, use it automatically. Returns None (macro signals stay
+    off) otherwise. World Bank isn't auto-selected here since it needs an ISO3 country
+    code we can't reliably infer from an arbitrary store/region string -- pass
+    `macro_source=WorldBankMacroSource(...)` explicitly for non-US analyses.
+    """
+    if not settings.fred_api_key:
+        return None
+    return FredMacroSource(settings.fred_api_key)
 
 
 def planner_node(state: PipelineState) -> dict:
@@ -45,14 +77,24 @@ def relationship_agent_node(state: PipelineState) -> dict:
 
 
 def competitor_signal_node(state: PipelineState) -> dict:
-    """Optional Phase 4 step: only runs when the caller supplied a `search_adapter` +
-    `competitor_brands`; otherwise `concurrent_shock` defaults to "none" and the
-    validator's override simply doesn't fire. `covariate_included` is left False here
-    -- `causal_agent_node` sets it once it knows whether the chosen method actually
-    has a covariate slot for this data (see `build_market_context`).
+    """Phase 4 step. Fully automatic when an Anthropic API key is configured: with no
+    extra input, this auto-constructs a real web-search adapter (`_default_search_adapter`)
+    and auto-derives which brands to search for from the choice set the relationship
+    agent just built (the incumbents this analysis is actually comparing against) --
+    "gather data on its own," CSV/sales data aside. An explicitly-supplied
+    `search_adapter`/`competitor_brands` always takes precedence. With neither
+    configured nor supplied, `concurrent_shock` defaults to "none" and the validator's
+    override simply doesn't fire. `covariate_included` is left False here --
+    `causal_agent_node` sets it once it knows whether the chosen method actually has a
+    covariate slot for this data (see `build_market_context`).
     """
-    search_adapter = state.get("search_adapter")
+    settings = get_settings()
+    search_adapter = state.get("search_adapter") or _default_search_adapter(settings)
     brands = state.get("competitor_brands") or []
+    if not brands and search_adapter is not None:
+        incumbent_ids = set(state["choice_set"].candidate_incumbent_ids)
+        brands = sorted({p.brand for p in state["products"] if p.product_id in incumbent_ids})
+
     if search_adapter is None or not brands:
         assessment = ConcurrentShockAssessment(
             level="none", rationale="No competitor signal source configured."
@@ -81,12 +123,18 @@ def competitor_signal_node(state: PipelineState) -> dict:
 
 
 def macro_signal_node(state: PipelineState) -> dict:
-    """Optional Phase 4 step: only runs when the caller supplied a `macro_source` +
-    `macro_indicators`; otherwise `macro_series` is empty and macro data simply
-    doesn't appear in `market_context` below.
+    """Phase 4 step. Fully automatic when a FRED API key is configured: with no extra
+    input, this auto-constructs `FredMacroSource` (`_default_macro_source`) and
+    defaults to `DEFAULT_MACRO_INDICATORS`. An explicitly-supplied
+    `macro_source`/`macro_indicators` always takes precedence. With neither configured
+    nor supplied, `macro_series` is empty and macro data simply doesn't appear in
+    `market_context` below.
     """
-    macro_source = state.get("macro_source")
-    indicators = state.get("macro_indicators") or []
+    settings = get_settings()
+    macro_source = state.get("macro_source") or _default_macro_source(settings)
+    indicators = state.get("macro_indicators") or (
+        DEFAULT_MACRO_INDICATORS if macro_source is not None else []
+    )
     if macro_source is None or not indicators:
         return {"macro_series": []}
 
