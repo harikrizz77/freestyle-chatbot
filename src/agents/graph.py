@@ -108,14 +108,19 @@ def reporter_node(state: PipelineState) -> dict:
         state["final_result"],
         api_key=settings.anthropic_api_key,
         model=settings.anthropic_report_model,
+        data_profile=state.get("data_profile"),
+        method_selection=state.get("method_selection"),
     )
     return {"final_result": narrated}
 
 
 def halt_node(state: PipelineState) -> dict:
+    # deterministic template, no API key needed to explain a halt
     narrated = narrate(
-        state["final_result"]
-    )  # deterministic template, no API key needed to explain a halt
+        state["final_result"],
+        data_profile=state.get("data_profile"),
+        method_selection=state.get("method_selection"),
+    )
     return {"final_result": narrated}
 
 
