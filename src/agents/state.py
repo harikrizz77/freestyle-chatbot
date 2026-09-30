@@ -12,11 +12,18 @@ from src.agents.causal_agent import CausalAgentResult
 from src.causal.nested_logit import FittedChoiceModel
 from src.causal.uncertainty import MassBalanceError
 from src.data.base_adapter import DataAdapter
-from src.schema.core import AnalysisRequest, CustomerSegment, Product, SalesObservation
+from src.schema.core import (
+    AnalysisRequest,
+    CustomerSegment,
+    MarketContext,
+    Product,
+    SalesObservation,
+)
 from src.schema.results import CannibalizationResult, ReducedFormResult, ValidatorFlag
-from src.schema.signals import ConcurrentShockAssessment
+from src.schema.signals import CompetitorEvent, ConcurrentShockAssessment, MacroSeries
 from src.schema.tools import ChoiceSet, DataProfile, MethodSelection
 from src.signals.competitor import SearchAdapter
+from src.signals.macro import MacroSource
 
 NodeName = Literal[
     "planner",
@@ -35,6 +42,8 @@ class PipelineState(TypedDict, total=False):
     adapter: DataAdapter
     search_adapter: SearchAdapter | None
     competitor_brands: list[str]
+    macro_source: MacroSource | None
+    macro_indicators: list[str]
 
     # ---- planner ----
     raw_query: str
@@ -61,6 +70,9 @@ class PipelineState(TypedDict, total=False):
     preliminary_result: CannibalizationResult
 
     # ---- signals (Phase 4, optional) ----
+    competitor_events: list[CompetitorEvent]
+    macro_series: list[MacroSeries]
+    market_context: list[MarketContext]
     concurrent_shock: ConcurrentShockAssessment
 
     # ---- validator ----

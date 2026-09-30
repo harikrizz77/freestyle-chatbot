@@ -30,7 +30,7 @@ from src.causal.did import run_did
 from src.causal.nested_logit import FittedChoiceModel
 from src.causal.synthetic_control import run_synthetic_control
 from src.causal.uncertainty import bootstrap_ci
-from src.schema.core import Product, SalesObservation
+from src.schema.core import MarketContext, Product, SalesObservation
 from src.schema.results import CannibalizationResult, MethodName, ReducedFormResult
 from src.schema.tools import ChoiceSet, MethodSelection
 from src.tools import (
@@ -60,6 +60,7 @@ class CausalAgentResult:
         primary_reduced_form: list[ReducedFormResult],
         cross_check_reduced_form: list[ReducedFormResult],
         cross_check_overall_rate: float | None = None,
+        used_market_context: bool = False,
     ) -> None:
         self.preliminary_result = preliminary_result
         self.fitted_model = fitted_model
@@ -68,6 +69,10 @@ class CausalAgentResult:
         # normalized the same way as preliminary_result.overall_rate (fraction of
         # total_focal_units), so validator.py can compare them directly
         self.cross_check_overall_rate = cross_check_overall_rate
+        # True iff competitor/macro data was actually folded into this run's math
+        # (not just used to flag a confound) -- see method_rules.yaml overrides'
+        # `competitor_or_macro_covariate_included` requirement, enforced in graph.py.
+        self.used_market_context = used_market_context
 
 
 def run_causal_analysis(
@@ -76,11 +81,14 @@ def run_causal_analysis(
     choice_set: ChoiceSet,
     method_selection: MethodSelection,
     seed: int = 42,
+    market_context: list[MarketContext] | None = None,
 ) -> CausalAgentResult:
     if method_selection.primary_method in STRUCTURAL_METHODS:
-        return _run_structural(products, sales, choice_set, method_selection, seed)
+        return _run_structural(products, sales, choice_set, method_selection, seed, market_context)
     if method_selection.primary_method in REDUCED_FORM_METHODS:
-        return _run_reduced_form(products, sales, choice_set, method_selection, seed)
+        return _run_reduced_form(
+            products, sales, choice_set, method_selection, seed, market_context
+        )
     return _run_bayesian_shrinkage(products, sales, choice_set, method_selection, seed)
 
 
@@ -90,10 +98,13 @@ def _run_structural(
     choice_set: ChoiceSet,
     method_selection: MethodSelection,
     seed: int,
+    market_context: list[MarketContext] | None,
 ) -> CausalAgentResult:
     from src.causal.counterfactual import compute_counterfactual
 
-    design = build_aggregate_design(sales, choice_set)
+    design = build_aggregate_design(
+        sales, choice_set, products=products, market_context=market_context
+    )
     fitted = fit_structural_model(design, engine="native_mle")
     outcome = compute_counterfactual(fitted, choice_set.focal_product_id)
     incumbent_ids = choice_set.candidate_incumbent_ids
@@ -115,7 +126,7 @@ def _run_structural(
         seed=seed,
         mass_balance=outcome.mass_balance,
     )
-    return CausalAgentResult(result, fitted, [], [])
+    return CausalAgentResult(result, fitted, [], [], used_market_context=bool(market_context))
 
 
 def _incumbent_launch_date(products: list[Product]) -> date:
@@ -125,10 +136,32 @@ def _incumbent_launch_date(products: list[Product]) -> date:
     return focal.launch_date
 
 
+def _macro_covariate(periods: list[date], market_context: list[MarketContext] | None) -> np.ndarray:
+    """Mean macro indicator value across all regions for each period, 0.0 where no
+    macro data was supplied for that period. Reduced-form methods aggregate sales
+    across regions already (see `build_reduced_form_series`), so this does the same
+    for the macro covariate to stay aligned with it.
+    """
+    if not market_context:
+        return np.zeros(len(periods))
+    values_by_period: dict[date, list[float]] = {}
+    for context in market_context:
+        if context.macro_index:
+            values_by_period.setdefault(context.period, []).extend(context.macro_index.values())
+    return np.array(
+        [float(np.mean(values_by_period[p])) if values_by_period.get(p) else 0.0 for p in periods]
+    )
+
+
 def _run_one_reduced_form(
-    method: MethodName, series: ReducedFormSeries, incumbent_id: str
+    method: MethodName,
+    series: ReducedFormSeries,
+    incumbent_id: str,
+    market_context: list[MarketContext] | None,
 ) -> ReducedFormResult:
     if method == "synthetic_control":
+        # No covariate slot: synthetic control only re-weights a donor pool, so
+        # market_context (if supplied) doesn't change this method's math.
         return run_synthetic_control(
             incumbent_id,
             series.incumbent_pre,
@@ -138,12 +171,14 @@ def _run_one_reduced_form(
             donor_ids=series.donor_ids,
         )
     if method == "causal_impact":
+        macro_pre = _macro_covariate(series.periods_pre, market_context).reshape(-1, 1)
+        macro_post = _macro_covariate(series.periods_post, market_context).reshape(-1, 1)
         return run_causal_impact(
             incumbent_id,
             series.incumbent_pre,
-            series.donor_pre,
+            np.hstack([series.donor_pre, macro_pre]),
             series.incumbent_post,
-            series.donor_post,
+            np.hstack([series.donor_post, macro_post]),
         )
     if method == "did":
         pre_len, post_len = len(series.periods_pre), len(series.periods_post)
@@ -154,8 +189,11 @@ def _run_one_reduced_form(
         ]
         units = np.vstack([incumbent_full, *donor_rows]) if donor_rows else incumbent_full[None, :]
         post_mask = np.array([False] * pre_len + [True] * post_len)
+        macro_full = _macro_covariate(series.periods_pre + series.periods_post, market_context)
+        n_entities = 1 + len(series.donor_ids)
+        covariates = np.tile(macro_full, (n_entities, 1))[:, :, None]
         result, _passed = run_did(
-            incumbent_id, [incumbent_id, *series.donor_ids], 0, units, post_mask
+            incumbent_id, [incumbent_id, *series.donor_ids], 0, units, post_mask, covariates
         )
         return result
     raise ValueError(f"unsupported reduced-form method: {method}")
@@ -167,6 +205,7 @@ def _aggregate_reduced_form(
     choice_set: ChoiceSet,
     method: MethodName,
     launch_date: date,
+    market_context: list[MarketContext] | None,
 ) -> tuple[list[ReducedFormResult], float, float, float]:
     """Runs `method` per incumbent (donors = the other incumbents) and sums the
     implied cannibalized units. Returns (per-incumbent results, total cannibalized
@@ -183,7 +222,7 @@ def _aggregate_reduced_form(
         series = build_reduced_form_series(sales, incumbent_id, donor_ids, launch_date)
         if len(series.periods_pre) < 2 or len(series.periods_post) < 1:
             continue
-        result = _run_one_reduced_form(method, series, incumbent_id)
+        result = _run_one_reduced_form(method, series, incumbent_id, market_context)
         results.append(result)
         cannibalized = max(-result.impact_units, 0.0)
         total += cannibalized
@@ -198,6 +237,7 @@ def _run_reduced_form(
     choice_set: ChoiceSet,
     method_selection: MethodSelection,
     seed: int,
+    market_context: list[MarketContext] | None,
 ) -> CausalAgentResult:
     launch_date = _incumbent_launch_date(products)
     focal_id = choice_set.focal_product_id
@@ -206,7 +246,7 @@ def _run_reduced_form(
     )
 
     primary_results, cannibalized, ci_low, ci_high = _aggregate_reduced_form(
-        products, sales, choice_set, method_selection.primary_method, launch_date
+        products, sales, choice_set, method_selection.primary_method, launch_date, market_context
     )
     overall_rate = cannibalized / total_focal_units if total_focal_units > 0 else 0.0
     rate_ci_low = ci_low / total_focal_units if total_focal_units > 0 else 0.0
@@ -216,7 +256,12 @@ def _run_reduced_form(
     cross_check_overall_rate: float | None = None
     if method_selection.cross_check_methods:
         cross_check_results, cc_cannibalized, _, _ = _aggregate_reduced_form(
-            products, sales, choice_set, method_selection.cross_check_methods[0], launch_date
+            products,
+            sales,
+            choice_set,
+            method_selection.cross_check_methods[0],
+            launch_date,
+            market_context,
         )
         if total_focal_units > 0:
             cross_check_overall_rate = cc_cannibalized / total_focal_units
@@ -232,8 +277,18 @@ def _run_reduced_form(
         confidence="high",  # provisional -- validator.py has the final say
         seed=seed,
     )
+    # only causal_impact/did actually have a covariate slot for market_context
+    used_market_context = bool(market_context) and method_selection.primary_method in (
+        "causal_impact",
+        "did",
+    )
     return CausalAgentResult(
-        result, None, primary_results, cross_check_results, cross_check_overall_rate
+        result,
+        None,
+        primary_results,
+        cross_check_results,
+        cross_check_overall_rate,
+        used_market_context=used_market_context,
     )
 
 

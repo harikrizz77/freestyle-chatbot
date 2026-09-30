@@ -23,7 +23,8 @@ from src.causal.nested_logit import (
     fit_via_xlogit,
 )
 from src.data.base_adapter import DataAdapter
-from src.schema.core import AnalysisRequest, Product, SalesObservation
+from src.schema.core import AnalysisRequest, MarketContext, Product, SalesObservation
+from src.schema.signals import CompetitorEvent, MacroSeries
 from src.schema.tools import ChoiceSet, ChoiceSetEntry
 
 _ENGINE_DISPATCH = {
@@ -129,9 +130,85 @@ def build_choice_set(
     )
 
 
+_COMPETITOR_EVENT_WEIGHT: dict[str, float] = {
+    "competitor_launch": 1.0,
+    "price_cut": 0.8,
+    "stockout": 0.6,
+    "promotion": 0.4,
+    "price_increase": -0.3,
+    "other": 0.2,
+}
+
+
+def build_market_context(
+    sales: list[SalesObservation],
+    competitor_events: list[CompetitorEvent] | None = None,
+    macro_series: list[MacroSeries] | None = None,
+) -> list[MarketContext]:
+    """Turns raw signal-layer output (`CompetitorEvent`s from `src/signals/competitor.py`,
+    `MacroSeries` from `src/signals/macro.py`) into one `MarketContext` per (region,
+    period) market present in `sales` -- the shape `build_aggregate_design` needs to
+    fold these into the fitted model's `competitor_pressure`/`macro_index` covariates,
+    rather than only using them to flag/downgrade confidence after the fact (build plan
+    section 9: "feed all of these into ... covariate sets ... -- re-estimate, don't
+    annotate").
+
+    Each raw event/observation is assigned to the latest sales period at-or-before its
+    own date, per region (an "as-of" join), since news/macro dates rarely land exactly
+    on a sales period boundary. Competitor pressure per brand is the confidence-weighted
+    sum of its events in that market (see `_COMPETITOR_EVENT_WEIGHT` for the per-kind
+    weights -- a deliberately simple, documented heuristic, not a fitted quantity).
+    """
+    competitor_events = competitor_events or []
+    macro_series = macro_series or []
+
+    periods_by_region: dict[str, list[date]] = {}
+    for obs in sales:
+        periods_by_region.setdefault(obs.region, []).append(obs.period)
+    for region, periods in periods_by_region.items():
+        periods_by_region[region] = sorted(set(periods))
+
+    def as_of_period(region: str, as_of: date) -> date | None:
+        periods = periods_by_region.get(region, [])
+        eligible = [p for p in periods if p <= as_of]
+        if eligible:
+            return max(eligible)
+        return min(periods) if periods else None
+
+    macro_by_market: dict[tuple[str, date], dict[str, float]] = {}
+    for series in macro_series:
+        for obs_date, value in sorted(series.series.items()):
+            period = as_of_period(series.region, obs_date)
+            if period is None:
+                continue
+            macro_by_market.setdefault((series.region, period), {})[series.indicator] = value
+
+    pressure_by_market: dict[tuple[str, date], dict[str, float]] = {}
+    for event in competitor_events:
+        period = as_of_period(event.region, event.event_date)
+        if period is None:
+            continue
+        weight = _COMPETITOR_EVENT_WEIGHT.get(event.kind, 0.2) * event.confidence
+        bucket = pressure_by_market.setdefault((event.region, period), {})
+        bucket[event.competitor_brand] = bucket.get(event.competitor_brand, 0.0) + weight
+
+    return [
+        MarketContext(
+            region=region,
+            period=period,
+            macro_index=macro_by_market.get((region, period), {}),
+            competitor_pressure=pressure_by_market.get((region, period), {}),
+        )
+        for region, periods in periods_by_region.items()
+        for period in periods
+    ]
+
+
 def build_aggregate_design(
     sales: list[SalesObservation],
     choice_set: ChoiceSet,
+    products: list[Product] | None = None,
+    market_context: list[MarketContext] | None = None,
 ) -> NestedLogitDesign:
     """Turns aggregate region x period sales (the shape scanner/registrations/shipment
     adapters actually provide) into a `NestedLogitDesign` with one row per market and
@@ -142,11 +219,20 @@ def build_aggregate_design(
     Requires every `SalesObservation.market_size` to be populated (the adapter's
     market-size proxy); this is what lets the no-purchase share be inferred as the gap
     between total market size and observed unit sales.
+
+    `products` (for brand lookup) and `market_context` (from `build_market_context`)
+    are optional: when supplied, each real alternative's `competitor_pressure` column
+    is set to that market's pressure on *its own brand*, and every real alternative's
+    `macro_index` column is set to that market's mean macro indicator value. Omitting
+    them (the default) leaves both at zero, exactly as before -- external factors only
+    influence the fit when the caller actually supplies the data for them.
     """
     product_order = [e.product_id for e in choice_set.entries]
     if product_order[-1] != NO_PURCHASE_ID:
         raise ValueError("choice_set.entries must end with the no-purchase option")
     nest_of_product = {e.product_id: e.nest for e in choice_set.entries}
+    brand_by_product = {p.product_id: p.brand for p in (products or [])}
+    context_by_market = {(c.region, c.period): c for c in (market_context or [])}
 
     markets: dict[tuple[str, date], dict[str, tuple[float, float, float]]] = {}
     for obs in sales:
@@ -167,12 +253,19 @@ def build_aggregate_design(
     market_size = np.zeros(n)
     price_over_income = np.zeros((n, j))
     choice_weights = np.zeros((n, j))
+    macro_index = np.zeros((n, j))
+    competitor_pressure = np.zeros((n, j))
     segment_ids = [f"{region}__{period.isoformat()}" for region, period in market_keys]
 
     for i, key in enumerate(market_keys):
         row = markets[key]
         any_market_size = next(iter(row.values()))[2]
         market_size[i] = any_market_size
+        context = context_by_market.get(key)
+        macro_value = 0.0
+        if context is not None and context.macro_index:
+            macro_value = float(np.mean(list(context.macro_index.values())))
+
         real_units_total = 0.0
         for j_idx, pid in enumerate(product_order[:-1]):  # exclude no-purchase
             if pid in row:
@@ -180,6 +273,11 @@ def build_aggregate_design(
                 price_over_income[i, j_idx] = price
                 choice_weights[i, j_idx] = units
                 real_units_total += units
+            macro_index[i, j_idx] = macro_value
+            if context is not None and context.competitor_pressure:
+                brand = brand_by_product.get(pid)
+                if brand is not None:
+                    competitor_pressure[i, j_idx] = context.competitor_pressure.get(brand, 0.0)
         choice_weights[i, -1] = max(any_market_size - real_units_total, 0.0)
 
     zeros = np.zeros((n, j))
@@ -191,8 +289,8 @@ def build_aggregate_design(
         loyalty=zeros,
         price_over_income=price_over_income,
         feature_match=zeros,
-        competitor_pressure=zeros,
-        macro_index=zeros,
+        competitor_pressure=competitor_pressure,
+        macro_index=macro_index,
         choice_weights=choice_weights,
     )
     return design

@@ -148,8 +148,10 @@ _CONFIDENCE_EXPLANATIONS = {
     ),
     "low": (
         "**Low** confidence means real limitations were found -- sparse data, a "
-        "failed statistical check, or an unmodeled outside event overlapping the "
-        "launch. Use this only as a rough directional signal, and see the flags "
+        "failed statistical check, or an outside event overlapping the launch (even "
+        "one we did model as a covariate still means the estimate is entangled with "
+        "that event, not a clean read on the launch alone). Use this only as a rough "
+        "directional signal, and see the flags "
         "below for exactly why."
     ),
 }
@@ -235,6 +237,7 @@ def _template_narrate(
     lines += _question_section(result)
     if data_profile is not None:
         lines += _data_section(data_profile)
+    lines += _factors_section(result)
     lines += _method_section(result, method_selection)
     if result.segments:
         lines += _segments_section(result)
@@ -294,6 +297,18 @@ def _data_section(data_profile: DataProfile) -> list[str]:
         "of history from before the launch to establish a 'normal' baseline."
     )
     return ["## What data we used", summary, ""]
+
+
+def _factors_section(result: CannibalizationResult) -> list[str]:
+    """Answers, for this specific run, "was it only sales data, or were competitor
+    moves/macro conditions factored in too?" -- explicit and unconditional, not just
+    surfaced when something went wrong, per `src/agents/validator.py`'s
+    `external_factors_included` flag.
+    """
+    flag = next((f for f in result.validator_flags if f.check == "external_factors_included"), None)
+    if flag is None:
+        return []
+    return ["## What factors fed into this number", flag.detail, ""]
 
 
 def _method_section(

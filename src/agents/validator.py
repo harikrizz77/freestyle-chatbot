@@ -32,6 +32,27 @@ def validate(
     confidence: Confidence = "high"
     confounders: list[str] = []
 
+    # 0. Transparency: record whether competitor/macro data was actually folded into
+    # this run's math (not just used to flag a confound) -- surfaced by the reporter
+    # regardless of whether a confound was ever detected, so every run states plainly
+    # what fed into its number.
+    flags.append(
+        ValidatorFlag(
+            check="external_factors_included",
+            passed=True,
+            detail=(
+                "Competitor and/or macro data was supplied and folded into the model "
+                "as covariates for this run."
+                if causal_result.used_market_context
+                else (
+                    "No competitor/macro data was supplied for this run; only sales "
+                    "volume, price, and brand grouping fed into the estimate."
+                )
+            ),
+            severity="info",
+        )
+    )
+
     # 1. Mass balance -- an implementation bug, not a data problem. Halt immediately.
     if prelim.mass_balance is not None:
         try:

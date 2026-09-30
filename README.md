@@ -21,11 +21,11 @@ against; this README documents what's actually implemented against that spec.
 |---|---|---|
 | 1 | Causal engine: native nested-logit MLE + counterfactual + bootstrap/delta-method CI + mass-balance check + synthetic control / CausalImpact / DiD cross-checks | `tests/unit/test_counterfactual.py` reproduces a hand-derived known answer; mass balance holds to float precision |
 | 2 | Typed tools layer + 3 industry adapters (CPG scanner, auto registrations, electronics shipments) over one `GenericCSVAdapter` | `tests/integration/test_industry_agnosticism.py` runs two different industries through the same `build_choice_set` call, zero branching |
-| 3 | LangGraph agent graph (planner → data_agent → relationship_agent → method_selector → causal_agent → validator → reporter) with a hard-gate validator | `tests/integration/test_agent_graph.py` runs the graph end-to-end and proves the validator blocks a seeded confirmed-competitor-shock case |
-| 4 | Segmentation (KMeans / region-price-tier fallback), competitor event sourcing, FRED/World Bank macro adapters | `tests/unit/test_segmentation.py`, `test_competitor.py`, `test_macro.py` |
+| 3 | LangGraph agent graph (planner → data_agent → relationship_agent → competitor_signal → macro_signal → method_selector → causal_agent → validator → reporter) with a hard-gate validator | `tests/unit/test_validator.py` proves a confirmed, unmodeled shock still halts; `tests/integration/test_agent_graph.py` proves the graph runs end-to-end |
+| 4 | Segmentation (KMeans / region-price-tier fallback), competitor event sourcing, FRED/World Bank macro adapters -- **folded into the fitted model as covariates**, not just used to flag a confound | `tests/unit/test_tools.py::test_build_aggregate_design_folds_in_competitor_pressure`; `tests/integration/test_agent_graph.py` proves a confirmed shock that's modeled downgrades confidence instead of halting, and that supplying competitor/macro data measurably changes the estimate |
 | 5 | FastAPI (`/analyze`, `/methods`, `/health`) + Streamlit dashboard | `tests/unit/test_api.py` |
 
-**63/63 tests passing**, `ruff check .` clean, `mypy` clean on `src/schema`, `src/causal`,
+**80/80 tests passing**, `ruff check .` clean, `mypy` clean on `src/schema`, `src/causal`,
 `src/data` (strict mode). Coverage on `src/causal` and `src/schema` (the spec's explicit
 target) is 90%+; see `pytest --cov=src --cov-report=term-missing`.
 
